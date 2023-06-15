@@ -5,7 +5,7 @@ import random
 import numpy as np
  
 from params import Params
-from process_mocap import build_KD_tree, tree_query, coordinate_transform, KD_tree_Env
+from process_mocap import build_KD_tree, tree_query, coordinate_transform
 
 from scipy.spatial.transform import Rotation
  
@@ -67,11 +67,12 @@ class PPOStorage:
 			self.permute()
 		self.sample_counter %= self.max_samples
 		self.sample_counter += batch_size
-		return self.states[self.sample_counter-batch_size:self.sample_counter, :], self.actions[self.sample_counter-batch_size:self.sample_counter, :], self.q_values[self.sample_counter-batch_size:self.sample_counter, :], self.log_probs[self.sample_counter-batch_size:self.sample_counter]
+		return self.states[self.sample_counter-batch_size:self.sample_counter, :], self.actions[self.sample_counter-batch_size:self.sample_counter, :], self.next_states[self.sample_counter-batch_size:self.sample_counter, :], self.q_values[self.sample_counter-batch_size:self.sample_counter, :], self.log_probs[self.sample_counter-batch_size:self.sample_counter]
 
 	def permute(self):
 		permuted_index = torch.randperm(self.max_samples)
 		self.states[:, :] = self.states[permuted_index, :]
+		self.next_states[:, :] = self.states[permuted_index, :]
 		self.actions[:, :] = self.actions[permuted_index, :]
 		self.q_values[:, :] = self.q_values[permuted_index, :]
 		self.log_probs[:] = self.log_probs[permuted_index]
@@ -108,20 +109,25 @@ class RL(object):
  
 		self.best_validation = 1.0
 		self.current_best_validation = 1.0
- 
- 
-		self.gpu_model = self.Net(self.num_inputs, self.num_outputs,self.hidden_layer)
-		self.gpu_model.to(device)
-		self.model_old = self.Net(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
 
-		self.kinematic_policy = ActorCriticNet(84, 9, self.hidden_layer).to(device)  #82 69
+		self.train_dynamics = True
+
+		if self.train_dynamics:
+			self.gpu_model = self.Net(self.num_inputs, self.num_outputs,self.hidden_layer)
+			self.model_old = self.Net(self.num_inputs, self.num_outputs, self.hidden_layer).to(device)
+		else:
+			self.gpu_model = self.Net(84, 9, self.hidden_layer).to(device)  #82 69
+			self.model_old = self.Net(84, 9, self.hidden_layer).to(device)
+		self.kinematic_policy = ActorCriticNetMann(84, 9, self.hidden_layer).to(device)
+		# self.dynamic_policy = ActorCriticNet(self.num_inputs, self.num_outputs,[1024, 1024]).to(device)
+		# self.dynamic_policy.load_state_dict(torch.load("stats/dynamics_FF_ELU/iter199999.pt"))
+		self.gpu_model.to(device)
+
  
 		self.base_controller = None
 		self.base_policy = None
  
 		self.total_rewards = []
-
-		self.train_dynamics = True
 
 		self.critic_optimizer = optim.AdamW(self.gpu_model.parameters(), lr=1e-4)
 		self.actor_optimizer = optim.AdamW(self.gpu_model.parameters(), lr=1e-4)
@@ -180,7 +186,6 @@ class RL(object):
 		real_rewards = []
 		log_probs = []
 		dones = []
-		time_limit_dones = []
 		noise = self.base_noise * self.explore_noise.value
 		self.gpu_model.set_noise(noise)
  
@@ -193,6 +198,7 @@ class RL(object):
 		start = time.time()
 		while samples < num_samples:
 			kin_state = self.env.get_reference()
+			state = self.env.observe()
 			with torch.no_grad():
 				action, mean_action = self.gpu_model.sample_actions(kin_state)
 				log_prob = self.gpu_model.calculate_prob(kin_state, action, mean_action)
@@ -207,11 +213,12 @@ class RL(object):
 				# self.current_phase[:, 6:9] += action.cpu().numpy()[:, -6:-3] * 5
 				dist, ind = tree_query(self.tree, self.current_phase, self.num_envs, self.feature_mean, self.feature_std, noise=action.cpu().numpy()[:, -9:])
 				# ind = ind[np.arange(self.num_envs), np.random.randint(0, 1, self.num_envs)]
-
+				reward = torch.zeros(400, device=device)
 				for t in range(5):
 					self.current_phase = self.phase[ind, t].copy()
 					self.next_phase = self.phase[ind, t+5].copy()
 					self.set_reference(ind, t=t)
+					self.set_reference_velocity(ind, t=t)
 
 					#update root reference
 					self.current_root_pos += np.matmul(self.current_root_orientation, self.root_linear_vel[ind, t, :, None]).squeeze()
@@ -222,8 +229,15 @@ class RL(object):
 					self.reference[:, 0:3] = np.matmul(self.base_rot, (self.current_root_pos + self.store_data[ind, t, :])[:, :, None]).squeeze() / 100
 					self.reference[:, 3:7] = Rotation.from_matrix(np.matmul(self.base_rot, np.matmul(self.current_root_orientation, self.bone_orientation[ind, t, :]))).as_quat()[:,[3,0,1,2]]
 					self.reference[self.reference[:, 3] < 0, 3:7] *= -1
-				self.env.set_reference(np.concatenate((self.current_phase, self.next_phase, self.reference), axis=1).astype(np.float32))
-				next_state, reward, done, _ = self.env.step(torch.zeros(self.num_envs, self.env.action_space.shape[0], device=device))
+					self.env.set_reference(np.concatenate((self.current_phase, self.next_phase, self.reference), axis=1).astype(np.float32))
+					self.env.set_reference_velocity(self.reference_velocity.astype(np.float32))
+
+					with torch.no_grad():
+						dynamics_obs = self.env.observe()
+						dynamics_obs[:, -36:] = 0
+						dynamic_act = self.dynamic_policy.sample_best_actions(dynamics_obs)
+						next_state, reward_temp, done, _ = self.env.step(dynamic_act)
+						reward += reward_temp.clone()
 				kin_state = self.env.get_reference()
 	 
 				dones.append(done.clone())
@@ -232,7 +246,7 @@ class RL(object):
 
 			# reward = self.discriminator.compute_disc_reward(state[:, np.concatenate(([0], np.arange(5,73), np.arange(130, 136)))], next_state[:, np.concatenate(([0], np.arange(5,73), np.arange(130, 136)))]) * 0.0 + reward
 
-				rewards.append(reward.clone())
+				rewards.append(reward.clone() / 5)
 
 				kin_state = kin_state.clone()
 
@@ -311,7 +325,7 @@ class RL(object):
 		start = time.time()
 		while samples < num_samples:
 			with torch.no_grad():
-				# kin_state = self.env.get_reference()
+				kin_state = self.env.get_reference()
 				# kinematic_action = self.kinematic_policy.sample_best_actions(kin_state)
  
 
@@ -331,35 +345,25 @@ class RL(object):
 					self.set_reference(self.current_index, t=0)
 
 					#update root reference
-					self.current_root_pos += np.matmul(self.current_root_orientation, self.root_linear_vel[self.current_index, 0, :, None]).squeeze()
-					self.current_root_orientation[:, :, :] = np.matmul(self.root_angular_vel[self.current_index, 0, :, :], self.current_root_orientation)
-					self.reference[:, 0:3] = np.matmul(self.base_rot, (self.current_root_pos + self.store_data[self.current_index, 0, :])[:, :, None]).squeeze() / 100
-					self.reference[:, 3:7] = Rotation.from_matrix(np.matmul(self.base_rot, np.matmul(self.current_root_orientation, self.bone_orientation[self.current_index, 0, :]))).as_quat()[:,[3,0,1,2]]
+					for k in range(2):
+						self.current_root_pos += np.matmul(self.current_root_orientation, self.root_linear_vel[self.current_index, k, :, None]).squeeze()
+						self.current_root_orientation[:, :, :] = np.matmul(self.root_angular_vel[self.current_index, k, :, :], self.current_root_orientation)
+						self.reference[:, 0:3] = np.matmul(self.base_rot, (self.current_root_pos + self.store_data[self.current_index, k, :])[:, :, None]).squeeze() / 100
+						self.reference[:, 3:7] = Rotation.from_matrix(np.matmul(self.base_rot, np.matmul(self.current_root_orientation, self.bone_orientation[self.current_index, k, :]))).as_quat()[:,[3,0,1,2]]
 					self.reference[self.reference[:, 3] < 0, 3:7] *= -1
 					self.env.set_reference(np.concatenate((self.current_phase, self.next_phase ,self.reference), axis=1).astype(np.float32))
+					next_state, reward, done, _ = self.env.step(action)
 
-					next_state, reward, done, _ = self.env.step(action) 
+					# print(reward[0], done[0])
+
+					reward = reward #- 0.001 * torch.from_numpy(dist[np.arange(self.num_envs), np.random.randint(0, 1, 400)]).cuda()	 
 					dones.append(done.clone())
 		 
 					next_states.append(next_state.clone())
 					rewards.append(reward.clone())
 
 					state = next_state.clone()
-					self.current_index += 1
-
-					#uncomment when training pick up policy
-					# possible_changed_index = (self.current_index == 600)
-					# change = np.random.choice(2, 400)
-					# self.current_index[possible_changed_index] = 400 * change[(self.current_index == 600)] + 600 * (1 - change[(self.current_index == 600)])
-					# self.current_index[self.current_index >= 700] = 400  #600
-					# self.current_index[self.current_index == 420] = 560   #440 520 for platform 0.3
-					# self.current_index[self.current_index >= 1000] = 600
-
-					# possible_changed_index = (self.current_index == 460)
-					# change = np.random.choice(2, 400)
-					# self.current_index[possible_changed_index] = self.starting_frame * change[(self.current_index == 460)] + 459 * (1 - change[(self.current_index == 460)])
-					self.current_index[self.current_index >= 560] = self.starting_frame  #600
-					# self.current_index[self.current_index == 360] = 410
+					self.current_index += 2
 
 					#reset done state
 					done_cpu = done.cpu().numpy()
@@ -370,11 +374,30 @@ class RL(object):
 						self.env.num_steps[done_cpu==1] = 0
 						prob = 1.0 / self.sampling_count
 						prob = prob / prob.sum() 
-						# starting_frame = np.random.randint(2000, size=done_cpu.sum()) * 1 + 1
-						# starting_frame = np.random.choice(self.starting_index_array, size=done_cpu.sum(), prob)
 						starting_index = np.random.choice(self.sampling_count.shape[0], size=done_cpu.sum(), p=prob)
 						self.sampling_starting_index[done_cpu==1] = starting_index
 						starting_frame = self.starting_index_array[starting_index]
+
+						#processed done and starting index for idle
+						# self.idle_sampling_count[self.idle_sampling_starting_index[(done_cpu[400:]==1)]] += self.env.num_steps[400:][done_cpu[400:]==1]
+						# self.idle_sampling_count.clip(1, 1000000)
+						# self.env.num_steps[400:][done_cpu[400:]==1] = 0
+						# prob = 1.0 / self.idle_sampling_count
+						# prob = prob / prob.sum() 
+						# idle_starting_index = np.random.choice(self.idle_sampling_count.shape[0], size=done_cpu[400:].sum(), p=prob)
+						# self.idle_sampling_starting_index[(done_cpu[400:]==1)] = idle_starting_index
+						# idle_starting_frame = self.idle_starting_index_array[idle_starting_index]
+
+						# self.walking_sampling_count[self.walking_sampling_starting_index[done_cpu[0:400]==1]] += self.env.num_steps[0:400][done_cpu[0:400]==1]
+						# self.walking_sampling_count.clip(1, 1000000)
+						# self.env.num_steps[0:400][done_cpu[0:400]==1] = 0
+						# prob = 1.0 / self.walking_sampling_count
+						# prob = prob / prob.sum() 
+						# walking_starting_index = np.random.choice(self.walking_sampling_count.shape[0], size=done_cpu[0:400].sum(), p=prob)
+						# self.walking_sampling_starting_index[(done_cpu[0:400]==1)] = walking_starting_index
+						# walking_starting_frame = self.walking_starting_index_array[walking_starting_index]
+
+						# starting_frame = np.concatenate((walking_starting_frame, idle_starting_frame))
 						
 
 						self.current_phase[done_cpu==1, :] = self.phase[starting_frame, 0, 0:9].copy()
@@ -401,7 +424,6 @@ class RL(object):
 
 					if (time_limit_done.sum() > 0):
 						#process count and starting index
-						# starting_frame = np.random.randint(2000, size=time_limit_done.sum()) * 1 + 1
 						self.sampling_count[self.sampling_starting_index[time_limit_done==1]] += self.env.num_steps[time_limit_done==1]
 						self.sampling_count.clip(1, 1000000)
 						self.env.num_steps[time_limit_done==1] = 0
@@ -410,6 +432,27 @@ class RL(object):
 						starting_index = np.random.choice(self.sampling_count.shape[0], size=time_limit_done.sum(), p=prob)
 						self.sampling_starting_index[time_limit_done==1] = starting_index
 						starting_frame = self.starting_index_array[starting_index]
+						
+						# divide dataset
+						# self.idle_sampling_count[self.idle_sampling_starting_index[(time_limit_done[400:]==1)]] += self.env.num_steps[400:][time_limit_done[400:]==1]
+						# self.idle_sampling_count.clip(1, 1000000)
+						# self.env.num_steps[400:][time_limit_done[400:]==1] = 0
+						# prob = 1.0 / self.idle_sampling_count
+						# prob = prob / prob.sum() 
+						# idle_starting_index = np.random.choice(self.idle_sampling_count.shape[0], size=time_limit_done[400:].sum(), p=prob)
+						# self.idle_sampling_starting_index[(time_limit_done[400:]==1)] = idle_starting_index
+						# idle_starting_frame = self.idle_starting_index_array[idle_starting_index]
+
+						# self.walking_sampling_count[self.walking_sampling_starting_index[time_limit_done[0:400]==1]] += self.env.num_steps[0:400][time_limit_done[0:400]==1]
+						# self.walking_sampling_count.clip(1, 1000000)
+						# self.env.num_steps[0:400][time_limit_done[0:400]==1] = 0
+						# prob = 1.0 / self.walking_sampling_count
+						# prob = prob / prob.sum() 
+						# walking_starting_index = np.random.choice(self.walking_sampling_count.shape[0], size=time_limit_done[0:400].sum(), p=prob)
+						# self.walking_sampling_starting_index[(time_limit_done[0:400]==1)] = walking_starting_index
+						# walking_starting_frame = self.walking_starting_index_array[walking_starting_index]
+
+						# starting_frame = np.concatenate((walking_starting_frame, idle_starting_frame))
 						
 
 						self.current_phase[time_limit_done==1, :] = self.phase[starting_frame, 0, 0:9].copy()
@@ -436,14 +479,11 @@ class RL(object):
 		counter = num_samples - 1
 		R = self.gpu_model.get_value(state)
 		while counter >= 0:
-			with torch.no_grad():
-				# import ipdb; ipdb.set_trace()
-				R = self.gpu_model.get_value(next_states[counter]) * time_limit_dones[counter].unsqueeze(-1).float() + (1 - time_limit_dones[counter].unsqueeze(-1).float()) * R
-				# import ipdb; ipdb.set_trace()
-				R = R * (1 - dones[counter].unsqueeze(-1))
-				R = 0.99 * R + rewards[counter].unsqueeze(-1)
-				q_values.insert(0, R)
-				counter -= 1
+			R = self.gpu_model.get_value(next_states[counter]) * time_limit_dones[counter].unsqueeze(-1).float() + (1 - time_limit_dones[counter].unsqueeze(-1).float()) * R
+			R = R * (1 - dones[counter].unsqueeze(-1))
+			R = 0.99 * R + rewards[counter].unsqueeze(-1)
+			q_values.insert(0, R)
+			counter -= 1
 			#print(len(q_values))
 		for i in range(num_samples):
 			self.storage.push(states[i], actions[i], next_states[i], rewards[i], q_values[i], log_probs[i], self.num_envs)
@@ -492,7 +532,7 @@ class RL(object):
 
 			optimizer.zero_grad()
 			loss_value.backward()
-			torch.nn.utils.clip_grad_norm_(self.gpu_model.parameters(), 1.0)
+			nn.utils.clip_grad_norm_(self.gpu_model.parameters(), 1.0)
 			optimizer.step()
 			
  
@@ -506,7 +546,7 @@ class RL(object):
 		params_clip = self.params.clip
  
 		for k in range(num_epoch):
-			batch_states, batch_actions, batch_q_values, batch_log_probs = storage.actor_sample(batch_size)
+			batch_states, batch_actions, batch_next_states, batch_q_values, batch_log_probs = storage.actor_sample(batch_size)
  
 			# batch_q_values = batch_q_values# / self.max_reward.value
  
@@ -523,12 +563,19 @@ class RL(object):
 			surr2 = ratio.clamp(1-params_clip, 1+params_clip) * batch_advantages
 			loss_clip = -(torch.min(surr1, surr2)).mean()
 
-			# phase_mag_loss = (batch_states[:, -9] **2 + batch_states[:, -8]**2) * mean_actions[:, -9]**2 + (batch_states[:, -7] **2 * 10 + batch_states[:, -6]**2) * mean_actions[:, -8]**2 * 10 + (batch_states[:, -5] **2 + batch_states[:, -4]**2) * mean_actions[:, -7]**2
+			#regularize action difference temporally: https://arxiv.org/pdf/2012.06644.pdf
+			# loss_T = ((gpu_model.sample_best_actions(batch_states)-gpu_model.sample_best_actions(batch_next_states))**2).mean()
 
-			total_loss = loss_clip + 0.01 * (mean_actions**2).mean()
+			#regularize action difference for close state
+			# with torch.no_grad():
+			# 	noisy_batch_states = batch_states + torch.randn(batch_states.size(), device=device) * 0.01
+			# loss_S = ((gpu_model.sample_best_actions(batch_states)-gpu_model.sample_best_actions(noisy_batch_states))**2).mean()
+			#loss_gate = gpu_model.evaluate_policy_gate_l2(batch_states)
+			total_loss = loss_clip + 0.01 * (mean_actions**2).mean()# + loss_gate# + 0.5 * loss_T + 0.5 * loss_S
+			
 			optimizer.zero_grad()
 			total_loss.backward()
-			torch.nn.utils.clip_grad_norm_(self.gpu_model.parameters(), 1.0)
+			nn.utils.clip_grad_norm_(self.gpu_model.parameters(), 1.0)
 			optimizer.step()
 		#print(self.shared_obs_stats.mean.data)
 		if self.lr > 1e-4:
@@ -610,14 +657,16 @@ class RL(object):
 		self.time_passed = 0
 		score_counter = 0
 		total_thread = 0
-		max_samples = 40000
+		max_samples = self.num_envs * 50
 		self.storage = PPOStorage(self.num_inputs, self.num_outputs, max_size=max_samples)
 		seeds = [
 			i * 100 for i in range(num_threads)
 		]
-		self.explore_noise = mp.Value("f", -2.7) #-2.7
-		self.base_noise = np.ones(self.num_outputs)
-		# self.base_noise[-20:] /= 1.2
+		self.explore_noise = mp.Value("f", -2.5)
+		if self.train_dynamics:
+			self.base_noise = np.ones(self.num_outputs)
+		else:
+			self.base_noise = np.ones(9)
 		noise = self.base_noise * self.explore_noise.value
 		self.model.set_noise(noise)
 		self.gpu_model.set_noise(noise)
@@ -628,7 +677,10 @@ class RL(object):
 			iteration_start = time.time()
 			print(self.model_name)
 			while self.storage.counter < max_samples:
-				self.collect_samples_vec_dynamics(25, noise=noise)
+				if self.train_dynamics:
+					self.collect_samples_vec_dynamics(50, noise=noise)
+				else:
+					self.collect_samples_vec(100, noise=noise)
 			start = time.time()
 
 			self.update_critic(max_samples//4, 20)
@@ -654,45 +706,18 @@ class RL(object):
 		self.env_list.append(env)
 
 	def load_reference(self):
-		# self.tree, self.root_linear_vel, self.root_angular_vel, self.store_data, self.local_matrix, self.features, self.bone_orientation, self.phase, self.feature_mean, self.feature_std, self.bone_velocity = build_KD_tree()
-
-		self.kd_tree_env = KD_tree_Env(1)
-		self.root_linear_vel = self.kd_tree_env.root_linear_vel
-		self.root_angular_vel = self.kd_tree_env.root_angular_vel
-		self.store_data = self.kd_tree_env.store_data
-		self.local_matrix = self.kd_tree_env.local_matrix
-		self.features = self.kd_tree_env.features
-		self.bone_orientation = self.kd_tree_env.bone_orientation
-		self.phase = self.kd_tree_env.phase
-		self.bone_velocity = self.kd_tree_env.bone_velocity
+		self.tree, self.root_linear_vel, self.root_angular_vel, self.store_data, self.local_matrix, self.features, self.bone_orientation, self.phase, self.feature_mean, self.feature_std, self.bone_velocity = build_KD_tree()
 
 
-		# print(coordinate_transform(Rotation.from_matrix(self.local_matrix[0:1, 0, 11, 0:3, 0:3]).as_quat()[:, [3,0,1,2]]))
-		# print(coordinate_transform(Rotation.from_matrix(self.local_matrix[0:1, 0, 12, 0:3, 0:3]).as_quat()[:, [3,0,1,2]]))
-		# print(coordinate_transform(Rotation.from_matrix(self.local_matrix[0:1, 0, 13, 0:3, 0:3]).as_quat()[:, [3,0,1,2]]))
-
-		if self.pick_and_place:
-			self.root_linear_vel[460:560, :, :] = self.root_linear_vel[460, :, :]
-			self.root_angular_vel[460:560, :, :, :] = self.root_angular_vel[460, :, :, :]
-			self.store_data[460:560, :] = self.store_data[460, :]
-			self.local_matrix[460:560, :] = self.local_matrix[460, :]
-
-			self.root_linear_vel[360:410, :, :] = self.root_linear_vel[410, :, :]
-			self.root_angular_vel[360:410, :, :, :] = self.root_angular_vel[410, :, :, :]
-			self.store_data[360:410, :] = self.store_data[410, :]
-			self.local_matrix[360:410, :] = self.local_matrix[410, :]
-			self.bone_orientation[360:410, :] = self.bone_orientation[410, :]
-
-			self.root_linear_vel[0:560, 0, :] = 0
-			# print(self.root_angular_vel.shape)
-			self.root_angular_vel[0:560, 0, :, :] = 0
-			self.root_angular_vel[0:560, 0, 0, 0] = 1
-			self.root_angular_vel[0:560, 0, 1, 1] = 1
-			self.root_angular_vel[0:560, 0, 2, 2] = 1
+		# motion, next_motion = self.sample_motion_data(np.random.choice(1000, 10000))
+		# motion_mean = np.mean(motion.cpu().numpy(), axis=0)
+		# motion_std = np.mean(motion.cpu().numpy(), axis=0)
+		# self.discriminator.set_normalizer(motion_mean, motion_std)
 		
 		self.current_index = np.ones(self.num_envs, dtype=np.int) * self.starting_frame
 		self.current_phase = np.tile(self.phase[self.starting_frame, 0, 0:9].copy(), (self.num_envs, 1))
 		self.next_phase = np.tile(self.phase[self.starting_frame, 5:20:5, 0:9].copy().flatten(), (self.num_envs, 1))
+		print(self.next_phase.shape)
 		self.current_root_pos = np.zeros((self.num_envs, 3))
 		self.current_root_orientation = np.zeros((self.num_envs, 3, 3))
 		self.current_root_orientation[:, 0, 0] = 1
@@ -714,15 +739,38 @@ class RL(object):
 		self.env.set_reference(np.concatenate((self.current_phase, self.next_phase ,self.reference), axis=1).astype(np.float32))
 		self.env.set_reference_velocity(self.reference_velocity.astype(np.float32))
 
-		# self.starting_index_array = np.concatenate((np.arange(2184)+1, np.arange(2699)+1+3185, np.arange(2785)+1+3185+3700, np.arange(3431)+1+3185+3700+3786, np.arange(2526)+1+3185+3700+3786+4432, np.arange(3431)+1+3185+3700+3786+4432+3527, np.arange(2526)+1+3185+3700+3786+4432+3527+4432, np.arange(2184)+1+3185+3700+3786+4432+3527+4432+3527, np.arange(2785)+1+3185+3700+3786+4432+3527+4432+3527+3185, np.arange(2699)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786, np.arange(2406)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700, np.arange(2406)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700+3407))
-		# self.starting_index_array = np.concatenate((np.arange(2184)+1, np.arange(2699)+1+3185, np.arange(2785)+1+3185+3700, np.arange(3431)+1+3185+3700+3786, np.arange(2526)+1+3185+3700+3786+4432, np.arange(3431)+1+3185+3700+3786+4432+3527, np.arange(2526)+1+3185+3700+3786+4432+3527+4432, np.arange(2184)+1+3185+3700+3786+4432+3527+4432+3527, np.arange(2785)+1+3185+3700+3786+4432+3527+4432+3527+3185, np.arange(2699)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786, np.arange(2406)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700, np.arange(2406)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700+3407, np.arange(1926)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700+3407+3407, np.arange(926)+1+3185+3700+3786+4432+3527+4432+3527+3185+3786+3700+3407+3407+1927))
-		# self.starting_index_array = np.concatenate((np.arange(1926)+1, np.arange(1926)+1+1927, np.arange(1244)+1+1927+1927, np.arange(244)+1+1927+1927+1245))
-		# self.starting_index_array = np.concatenate((np.arange(1926)+1, np.arange(1926)+1+1927, np.arange(1244)+1+1927+1927, np.arange(244)+1+1927+1927+1245, np.arange(2184)+1+1927+1927+1245+1245, np.arange(2184)+1+3185+1927+1927+1245+1245))
-		
-		#self.starting_index_array = np.concatenate((np.arange(2784) + 2, np.arange(2784)+2 + 3816))  ## carry
-		self.starting_index_array = np.arange(1) + self.starting_frame
+		dataset_size = [3786, 4432, 4432, 3786, 4005, 4005, 3691, 3691, 11999, 11999, 3687, 3687, 4049, 4049, 3666, 3666, 4181, 4181, 3045, 3045]
+		# dataset_size = [3786, 3786, 3045, 3045]
+		# self.starting_index_array = np.arange(2043) + 2
+		self.starting_index_array = np.arange(2784) + 2
+		processed_data_size = dataset_size[0]
+		for i in range(1, len(dataset_size)):
+			self.starting_index_array = np.concatenate((np.arange(dataset_size[i]-1002)+2+processed_data_size, self.starting_index_array))
+			processed_data_size += dataset_size[i]
+		print(self.starting_index_array.shape)
 		self.sampling_starting_index = np.zeros(self.num_envs, np.int32)
 		self.sampling_count = np.ones(self.starting_index_array.shape, np.int32)
+
+		#divide dataset
+		# dataset_size = [3786, 3786]
+		# self.walking_starting_index_array = np.arange(2784) + 2
+		# processed_data_size = dataset_size[0]
+		# for i in range(1, len(dataset_size)):
+		# 	self.walking_starting_index_array = np.concatenate((np.arange(dataset_size[i]-1002)+2+processed_data_size, self.walking_starting_index_array))
+		# 	processed_data_size += dataset_size[i]
+
+		# dataset_size = [3045, 3045]
+		# self.idle_starting_index_array = np.arange(2043) + 2 + 3786 + 3786
+		# processed_data_size = dataset_size[0] + 3786 + 3786
+		# for i in range(1, len(dataset_size)):
+		# 	self.idle_starting_index_array = np.concatenate((np.arange(dataset_size[i]-1002)+2+processed_data_size, self.idle_starting_index_array))
+		# 	processed_data_size += dataset_size[i]
+
+		# self.idle_sampling_starting_index = np.zeros(self.num_envs//2, np.int32)
+		# self.idle_sampling_count = np.ones(self.idle_starting_index_array.shape, np.int32)
+
+		# self.walking_sampling_starting_index = np.zeros(self.num_envs//2, np.int32)
+		# self.walking_sampling_count = np.ones(self.walking_starting_index_array.shape, np.int32)
 
 	def set_reference(self, index, t=0, env_id=None):
 		if env_id is None:
@@ -746,15 +794,12 @@ class RL(object):
 		self.reference[env_id, 67:71] = coordinate_transform(Rotation.from_matrix(self.local_matrix[index, t, 8, 0:3, 0:3]).as_quat()[:, [3,0,1,2]])
 		self.reference[env_id, 71:75] = coordinate_transform(Rotation.from_matrix(self.local_matrix[index, t, 9, 0:3, 0:3]).as_quat()[:, [3,0,1,2]])
 
-		# self.reference[env_id, 63:75] = np.array([9.98472234e-01,  4.41946509e-03,  5.41092287e-02, -1.02887418e-02,  8.80818265e-01, -1.23713898e-01,
-  #        1.37720908e-01,  4.35760264e-01,  8.52879586e-01,
-  #       -1.97142974e-01,  3.55116974e-01,  3.28059438e-01])
-		# print(self.reference[0, 51:75])
-
-		self.reference[env_id, 63:75] = np.array([1.0, 0.0, 0.0, 0.0, 0.88, -0.13, 0.13, 0.438, 0.85, -0.2, 0.35, 0.34])
-		self.reference[env_id, 51:63] = np.array([1.0, 0.0, 0.0, 0.0, 0.88, -0.13, -0.13, -0.438, 0.85, -0.2, -0.35, -0.34])
-
+		# self.reference[env_id, 63:75] = np.array([9.98472234e-01,  4.41946509e-03,  5.41092287e-02, -1.02887418e-02,  8.80818265e-01, -1.23713898e-01, 1.37720908e-01,  4.35760264e-01,  8.52879586e-01, -1.97142974e-01,  3.55116974e-01,  3.28059438e-01])		
 		# self.reference[env_id, 51:63] = np.array([9.98673887e-01,  2.82588986e-02, -3.39619410e-02, 2.64289517e-02,  8.85221521e-01, -1.26977037e-01, -7.39741470e-02, -4.41347387e-01,  7.71478156e-01, -2.40705177e-01, -3.74336623e-01, -4.54702722e-01])
+
+
+		# self.reference[env_id, 63:75] = np.array([1.0, 0.0, 0.0, 0.0, 0.88, -0.13, 0.13, 0.438, 0.85, -0.2, 0.35, 0.34])
+		# self.reference[env_id, 51:63] = np.array([1.0, 0.0, 0.0, 0.0, 0.88, -0.13, -0.13, -0.438, 0.85, -0.2, -0.35, -0.34])
 
 	def set_reference_velocity(self, index, t=0, env_id=None):
 		if env_id is None:
@@ -789,7 +834,7 @@ def mkdir(base, name):
 if __name__ == '__main__':
 	import json
 	from ruamel.yaml import YAML, dump, RoundTripDumper
-	from raisimGymTorch.env.bin import motion_matching
+	from raisimGymTorch.env.bin import motion_matching_3
 	from raisimGymTorch.env.RaisimGymVecEnv import RaisimGymVecTorchEnv as VecEnv
 	from raisimGymTorch.helper.raisim_gym_helper import ConfigurationSaver, load_param, tensorboard_launcher
  
@@ -818,13 +863,12 @@ if __name__ == '__main__':
 	cfg = YAML().load(open(task_path + "/cfg.yaml", 'r'))
 
 	# create environment from the configuration file
-	env = VecEnv(motion_matching.RaisimGymEnv(home_path + "/rsc", dump(cfg['environment'], Dumper=RoundTripDumper)), cfg['environment'])
+	env = VecEnv(motion_matching_3.RaisimGymEnv(home_path + "/rsc", dump(cfg['environment'], Dumper=RoundTripDumper)), cfg['environment'])
 	print("env_created")
 	# env.setTask()
-	ppo = RL(env, [128, 128])
+	ppo = RL(env, [128, 128])  #128 128 for MANN
 	ppo.num_envs = 800
-	ppo.starting_frame = 320#10977 #400 for pick and place
-	ppo.pick_and_place = True
+	ppo.starting_frame = 200#10977 #400
 	ppo.load_reference()
  
 	ppo.base_dim = ppo.num_inputs
@@ -832,7 +876,7 @@ if __name__ == '__main__':
 	ppo.model_name = "stats/release_test/"
 	ppo.max_reward.value = 1#50
 	# ppo.kinematic_policy.load_state_dict(torch.load("back_and_forth.pt"))
-	# ppo.gpu_model.load_state_dict(torch.load("stats/pick_policy_zero_Jan19/iter18999.pt"))
+	# ppo.gpu_model.load_state_dict(torch.load("stats/strong_ankle/iter7999.pt"))
  
 	#ppo.save_model(ppo.model_name)
 	training_start = time.time()

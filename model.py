@@ -13,12 +13,24 @@ def init(module, weight_init, bias_init, gain=1):
     bias_init(module.bias.data.view(1, -1), gain=gain)
     return module
 
+def init_eye(module, weight_init):
+    weight_init(module.weight.data[0:53, 0:53])
+    nn.init.orthogonal_(module.weight.data[:, 53:-1], gain=0.1)
+    nn.init.orthogonal_(module.bias.data.view(1, -1), gain=0.1)
+    return module
+
 init_r_ = lambda m: init(
     m,
     nn.init.orthogonal_,
     nn.init.orthogonal_,
     0.1,
 )
+
+init_eye_ = lambda m: init_eye(
+    m,
+    nn.init.eye_,
+)
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class ActorCriticNet(nn.Module):
@@ -77,6 +89,7 @@ class ActorCriticNet(nn.Module):
         x = F.elu(self.p_fcs[0](inputs))
         for i in range(len(self.hidden_layer)-1):
             x = F.elu(self.p_fcs[i+1](x))
+
         mu = torch.tanh(self.mu(x))
         return mu
 
@@ -94,7 +107,9 @@ class ActorCriticNet(nn.Module):
     def get_action(self, inputs):
         x = F.relu(self.p_fcs[0](inputs))
         for i in range(len(self.hidden_layer)-1):
+            x = torch.cat((x, inputs), dim=-1)
             x = F.relu(self.p_fcs[i+1](x))
+        x = torch.cat((x, inputs), dim=-1)
         mu = torch.tanh(self.mu(x))
         log_std = Variable(self.noise*torch.ones(self.num_outputs)).unsqueeze(0).expand_as(mu)
         return mu, log_std
@@ -189,7 +204,7 @@ class Discriminator(nn.Module):
 
 
 class ActorCriticNetMann(nn.Module):
-    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], gating_layer=[256,256], num_contact=0):
+    def __init__(self, num_inputs, num_outputs, hidden_layer=[64, 64], num_contact=0):
         super(ActorCriticNetMann, self).__init__()
         self.num_outputs = num_outputs
         self.hidden_layer = hidden_layer
@@ -197,7 +212,7 @@ class ActorCriticNetMann(nn.Module):
         self.policy_experts = [nn.ModuleList(), nn.ModuleList()]
         self.value_experts = [nn.ModuleList(), nn.ModuleList()]
         self.num_experts = 8
-        self.num_gating_input = num_inputs #8
+        self.num_gating_input = num_inputs#37 #8
         self.num_additional_expert_input = num_inputs
         self.policy_layers = [
             (
@@ -237,8 +252,8 @@ class ActorCriticNetMann(nn.Module):
 
         self.actor_params = []
         for index, (weight, bias, activation) in enumerate(self.policy_layers):
-            if "relu" in activation.__name__:
-                gain = 0.1
+            if "elu" in activation.__name__:
+                gain = 1
             elif "tanh" in activation.__name__:
                 gain = 0.1
             else:
@@ -258,8 +273,8 @@ class ActorCriticNetMann(nn.Module):
         for index, (weight, bias, activation) in enumerate(self.value_layers):
             if activation is None:
                 gain = 1.0
-            elif "relu" in activation.__name__:
-                gain = 0.1
+            elif "elu" in activation.__name__:
+                gain = 1
             elif "tanh" in activation.__name__:
                 gain = 0.1
             else:
@@ -276,19 +291,19 @@ class ActorCriticNetMann(nn.Module):
             self.critic_params.append(bias)
 
         self.policy_gate = nn.Sequential(
-            nn.Linear(self.num_gating_input, gating_layer[0]),
+            nn.Linear(self.num_gating_input, 256),
             nn.ELU(),
-            nn.Linear(gating_layer[0], gating_layer[1]),
+            nn.Linear(256, 256),
             nn.ELU(),
-            nn.Linear(gating_layer[1], self.num_experts),
+            nn.Linear(256, self.num_experts),
         )
 
         self.value_gate = nn.Sequential(
-            nn.Linear(self.num_gating_input, gating_layer[0]),
+            nn.Linear(self.num_gating_input, 256),
             nn.ELU(),
-            nn.Linear(gating_layer[0], gating_layer[1]),
+            nn.Linear(256, 256),
             nn.ELU(),
-            nn.Linear(gating_layer[1], self.num_experts),
+            nn.Linear(256, self.num_experts),
         )
         
         self.log_std = nn.Parameter(torch.zeros(num_outputs),requires_grad=True)
@@ -319,7 +334,9 @@ class ActorCriticNetMann(nn.Module):
 
     def evaluate_policy_gate_l2(self, inputs):
         gating_weights = F.softmax(self.policy_gate(inputs[:, -self.num_gating_input:]), dim=1)
-        return (gating_weights**2).mean()
+        spec_loss = (gating_weights**2).mean()
+        util_loss = ((gating_weights.mean(dim=0))**2).mean()
+        return -util_loss
 
     def evaluate_value_gate_l2(self, inputs):
         gating_weights = F.softmax(self.value_gate(inputs[:, -self.num_gating_input:]), dim=1)
@@ -327,8 +344,8 @@ class ActorCriticNetMann(nn.Module):
 
     def sample_best_actions(self, inputs):
         gating_weights = F.softmax(self.policy_gate(inputs[:, -self.num_gating_input:]), dim=1).t().unsqueeze(-1)
+        # print(gating_weights)
         out = inputs[:, :].clone()
-        # print(gating_weights[:, 0])
 
         for (weight, bias, activation) in self.policy_layers[:-1]:
             out = activation(
@@ -349,7 +366,7 @@ class ActorCriticNetMann(nn.Module):
     def sample_best_action_and_coefficients(self, inputs):
         gating_weights = F.softmax(self.policy_gate(inputs[:, -self.num_gating_input:]), dim=1).t().unsqueeze(-1)
         # out = inputs[:, :-self.num_gating_input+self.num_additional_expert_input].clone()
-        out = inputs[:, :-self.num_gating_input+self.num_additional_expert_input].clone()
+        out = inputs[:, :].clone()
 
         for (weight, bias, activation) in self.policy_layers[:-1]:
             out = activation(
