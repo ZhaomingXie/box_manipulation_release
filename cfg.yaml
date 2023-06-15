@@ -4,27 +4,26 @@ record_video: yes
 environment:
   render: True
 # just testing commenting
-  num_envs: 800
+  num_envs: 1
   eval_every_n: 200
-  num_threads: 20
+  num_threads: 1
   simulation_dt: 0.008 #0.002
+
   control_dt: 0.032 #0.02
   max_time: 100.0
   reward:
     position:
-      coeff: 0.1  #dyn
+      coeff: 1  #dyn
     # orientation:
-    #   coeff: 0.1 #kin  0.1
+    #   coeff: 0. #kin  0.1
     joint:
       coeff: 1  #dyn
     # task:
-    #   coeff: 0.2  #kin  0.2
+    #   coeff: 0.  #kin  0.2
     dynamic_orientation:
       coeff: 1  #dyn
     box:
-      coeff: 1
-    torque:
-      coeff: 0.1
+      coeff: 0.1 #0.1
 
 architecture:
   policy_net: [128, 128]
