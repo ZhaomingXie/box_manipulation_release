@@ -199,41 +199,6 @@ def set_human_pose(index, hip_pose=None, hip_rot=None):
 	virtual_human.setState(reference, np.zeros([virtual_human.getDOF()]))
 
 def build_KD_tree():
-	# root_linear_vel1, root_angular_vel1, store_data1, local_matrix1, features1, bone_orientation1, phase1, bone_velocity1 = process_mocap("Loco/RunRandom.bvh", "NSM_phase2/RunRandom.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel2, root_angular_vel2, store_data2, local_matrix2, features2, bone_orientation2, phase2, bone_velocity2 = process_mocap("Loco/RunTurn1.bvh", "NSM_phase2/RunTurn1.bvh/Phases_Standard.txt")
-	# root_linear_vel3, root_angular_vel3, store_data3, local_matrix3, features3, bone_orientation3, phase3, bone_velocity3 = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/WalkRandom.bvh/Phases_Standard.txt")
-	# root_linear_vel4, root_angular_vel4, store_data4, local_matrix4, features4, bone_orientation4, phase4, bone_velocity4 = process_mocap("Loco/WalkSideBack1.bvh", "NSM_phase2/WalkSideBack1.bvh/Phases_Standard.txt")
-	# root_linear_vel5, root_angular_vel5, store_data5, local_matrix5, features5, bone_orientation5, phase5, bone_velocity5 = process_mocap("Loco/RunSideBack1.bvh", "NSM_phase2/RunSideBack1.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel6, root_angular_vel6, store_data6, local_matrix6, features6, bone_orientation6, phase6, bone_velocity6 = process_mocap("Loco/WalkSideBack1.bvh", "NSM_phase2/WalkSideBack1.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel7, root_angular_vel7, store_data7, local_matrix7, features7, bone_orientation7, phase7, bone_velocity7 = process_mocap("Loco/RunSideBack1.bvh", "NSM_phase2/RunSideBack1.bvh/Phases_Standard.txt")
-	# root_linear_vel8, root_angular_vel8, store_data8, local_matrix8, features8, bone_orientation8, phase8, bone_velocity8 = process_mocap("Loco/RunRandom.bvh", "NSM_phase2/RunRandom.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel9, root_angular_vel9, store_data9, local_matrix9, features9, bone_orientation9, phase9, bone_velocity9 = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/WalkRandom.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel10, root_angular_vel10, store_data10, local_matrix10, features10, bone_orientation10, phase10, bone_velocity10 = process_mocap("Loco/RunTurn1.bvh", "NSM_phase2/RunTurn1.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel11, root_angular_vel11, store_data11, local_matrix11, features11, bone_orientation11, phase11, bone_velocity11 = process_mocap("Loco/RunSideBack3.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel12, root_angular_vel12, store_data12, local_matrix12, features12, bone_orientation12, phase12, bone_velocity12 = process_mocap("Loco/RunSideBack3.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt")
-	# root_linear_vel13, root_angular_vel13, store_data13, local_matrix13, features13, bone_orientation13, phase13, bone_velocity13 = process_mocap("Jump/Jump2.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt")
-	# root_linear_vel14, root_angular_vel14, store_data14, local_matrix14, features14, bone_orientation14, phase14, bone_velocity14 = process_mocap("Jump/Jump2.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt", mirror=True)
-	# root_linear_vel15, root_angular_vel15, store_data15, local_matrix15, features15, bone_orientation15, phase15, bone_velocity15 = process_mocap("Crouch/Crouch2.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt")
-	# root_linear_vel16, root_angular_vel16, store_data16, local_matrix16, features16, bone_orientation16, phase16, bone_velocity16 = process_mocap("Crouch/Crouch2.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt", mirror=True)
-	# root_linear_vel17, root_angular_vel17, store_data17, local_matrix17, features17, bone_orientation17, phase17, bone_velocity17 = process_mocap("Door/PushDoor8.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt", mirror=True)
-	# root_linear_vel18, root_angular_vel18, store_data18, local_matrix18, features18, bone_orientation18, phase18, bone_velocity18 = process_mocap("Door/PushDoor8.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt")
-	# # print(root_linear_vel1.shape, root_linear_vel2.shape, root_linear_vel3.shape, root_linear_vel4.shape, root_linear_vel5.shape, root_linear_vel6.shape)
-	# # print(root_linear_vel7.shape, root_linear_vel8.shape, root_linear_vel9.shape, root_linear_vel10.shape)
-	# print(root_linear_vel12.shape)
-	
-	# root_linear_vel = np.concatenate((root_linear_vel1, root_linear_vel2, root_linear_vel3, root_linear_vel4, root_linear_vel5, root_linear_vel6, root_linear_vel7, root_linear_vel8, root_linear_vel9, root_linear_vel10, root_linear_vel11, root_linear_vel12, root_linear_vel13, root_linear_vel14, root_linear_vel15, root_linear_vel16, root_linear_vel17, root_linear_vel18))
-	# root_angular_vel = np.concatenate((root_angular_vel1, root_angular_vel2, root_angular_vel3, root_angular_vel4, root_angular_vel5, root_angular_vel6, root_angular_vel7, root_angular_vel8, root_angular_vel9, root_angular_vel10, root_angular_vel11, root_angular_vel12, root_angular_vel13, root_angular_vel14, root_angular_vel15, root_angular_vel16, root_angular_vel17, root_angular_vel18))
-	# store_data = np.concatenate((store_data1, store_data2, store_data3, store_data4, store_data5, store_data6, store_data7, store_data8, store_data9, store_data10, store_data11, store_data12, store_data13, store_data14, store_data15, store_data16,store_data17, store_data18))
-	# local_matrix = np.concatenate((local_matrix1, local_matrix2, local_matrix3, local_matrix4, local_matrix5, local_matrix6, local_matrix7, local_matrix8, local_matrix9, local_matrix10, local_matrix11, local_matrix12, local_matrix13, local_matrix14, local_matrix15, local_matrix16, local_matrix17, local_matrix18))
-	# features = np.concatenate((features1, features2, features3, features4, features5, features6, features7, features8, features9, features10, features11, features12, features13, features14, features15, features16, features17, features18))
-	# bone_orientation = np.concatenate((bone_orientation1, bone_orientation2, bone_orientation3, bone_orientation4, bone_orientation5, bone_orientation6, bone_orientation7, bone_orientation8, bone_orientation9, bone_orientation10, bone_orientation11, bone_orientation12, bone_orientation13, bone_orientation14, bone_orientation15, bone_orientation16, bone_orientation17, bone_orientation18))
-	# phase = np.concatenate((phase1, phase2, phase3, phase4, phase5, phase6, phase7, phase8, phase9, phase10, phase11, phase12, phase13, phase14, phase15, phase16, phase17, phase18))
-	# bone_velocity = np.concatenate((bone_velocity1, bone_velocity2, bone_velocity3, bone_velocity4, bone_velocity5, bone_velocity6, bone_velocity7, bone_velocity8, bone_velocity9, bone_velocity10, bone_velocity11, bone_velocity12, bone_velocity13, bone_velocity14, bone_velocity15, bone_velocity16, bone_velocity17, bone_velocity18))
-	
-
-	# root_linear_vel, root_angular_vel, store_data, local_matrix, features, bone_orientation, phase, bone_velocity = process_mocap("Loco/WalkSideBack1.bvh", "NSM_phase2/WalkSideBack1.bvh/Phases_Standard.txt", mirror=False)
-	# print(root_linear_vel.shape)
-
 	root_linear_vel1, root_angular_vel1, store_data1, local_matrix1, features1, bone_orientation1, phase1, bone_velocity1 = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/WalkRandom.bvh/Phases_Standard.txt")
 	root_linear_vel2, root_angular_vel2, store_data2, local_matrix2, features2, bone_orientation2, phase2, bone_velocity2 = process_mocap("Loco/WalkSideBack1.bvh", "NSM_phase2/WalkSideBack1.bvh/Phases_Standard.txt")
 	root_linear_vel3, root_angular_vel3, store_data3, local_matrix3, features3, bone_orientation3, phase3, bone_velocity3 = process_mocap("Loco/WalkSideBack1.bvh", "NSM_phase2/WalkSideBack1.bvh/Phases_Mirrored.txt", mirror=True)
@@ -266,19 +231,6 @@ def build_KD_tree():
 
 	# print(root_linear_vel1.shape[0], root_linear_vel2.shape[0], root_linear_vel3.shape[0], root_linear_vel4.shape[0], root_linear_vel5.shape[0], root_linear_vel6.shape[0], root_linear_vel7.shape[0], root_linear_vel8.shape[0], root_linear_vel9.shape[0], root_linear_vel10.shape[0], root_linear_vel11.shape[0], root_linear_vel12.shape[0], root_linear_vel13.shape[0], root_linear_vel14.shape[0], root_linear_vel15.shape[0], root_linear_vel16.shape[0], root_linear_vel17.shape[0], root_linear_vel18.shape[0], root_linear_vel19.shape[0], root_linear_vel20.shape[0])
 
-
-	# root_linear_vel1, root_angular_vel1, store_data1, local_matrix1, features1, bone_orientation1, phase1, bone_velocity1 = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/RunRandom.bvh/Phases_Mirrored.txt", mirror=True)
-	# root_linear_vel2, root_angular_vel2, store_data2, local_matrix2, features2, bone_orientation2, phase2, bone_velocity2 = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/WalkRandom.bvh/Phases_Standard.txt")
-	# root_linear_vel3, root_angular_vel3, store_data3, local_matrix3, features3, bone_orientation3, phase3, bone_velocity3 = process_mocap("Idle/Idle.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt")
-	# root_linear_vel4, root_angular_vel4, store_data4, local_matrix4, features4, bone_orientation4, phase4, bone_velocity4 = process_mocap("Idle/Idle.bvh", "NSM_phase2/RunSideBack3.bvh/Phases_Standard.txt", mirror=True)	
-	# root_linear_vel = np.concatenate((root_linear_vel1, root_linear_vel2, root_linear_vel3, root_linear_vel4))
-	# root_angular_vel = np.concatenate((root_angular_vel1, root_angular_vel2, root_angular_vel3, root_angular_vel4))
-	# store_data = np.concatenate((store_data1, store_data2, store_data3, store_data4))
-	# local_matrix = np.concatenate((local_matrix1, local_matrix2, local_matrix3, local_matrix4))
-	# features = np.concatenate((features1, features2, features3, features4))
-	# bone_orientation = np.concatenate((bone_orientation1, bone_orientation2, bone_orientation3, bone_orientation4))
-	# phase = np.concatenate((phase1, phase2, phase3, phase4))
-	# bone_velocity = np.concatenate((bone_velocity1, bone_velocity2, bone_velocity3, bone_velocity4))
 
 	# root_linear_vel, root_angular_vel, store_data, local_matrix, features, bone_orientation, phase, bone_velocity = process_mocap("Loco/WalkRandom.bvh", "NSM_phase2/RunRandom.bvh/Phases_Mirrored.txt", mirror=False)
 
